@@ -99,8 +99,10 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
 #sheet .card{width:100%;max-width:640px;border-radius:14px 14px 0 0;max-height:90%;overflow-y:auto;padding:18px 16px 22px}
 #sheet h3{margin:0 0 12px;font-family:var(--display);font-size:22px;font-weight:600}
 
-nav{display:grid;grid-template-columns:repeat(5,1fr);background:var(--surface);border-top:1px solid var(--line)}
-nav button{background:none;border:0;border-top:3px solid transparent;padding:12px 2px 14px;font-size:14px;font-weight:600;color:var(--muted)}
+nav{display:grid;grid-template-columns:repeat(6,1fr);background:var(--surface);border-top:1px solid var(--line)}
+nav button{background:none;border:0;border-top:3px solid transparent;padding:12px 1px 14px;font-size:13px;font-weight:600;color:var(--muted)}
+.spark{color:var(--accent);display:block}
+.hval{font-family:var(--display);font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
 nav button[aria-selected="true"]{color:var(--accent);border-top-color:var(--accent)}
 @media (prefers-reduced-motion: reduce){.meter i,.dial .fill{transition:none}}
 </style>
@@ -140,6 +142,13 @@ nav button[aria-selected="true"]{color:var(--accent);border-top-color:var(--acce
       <div class="card tile"><label>Intake air</label><div class="num" id="vIat">–</div></div>
       <div class="card tile" id="tMil"><label>Check engine light</label><div class="num" id="vMil">–</div><small id="vMilNote"></small></div>
     </div>
+  </section>
+
+  <section id="tab-health" hidden>
+    <div class="summary" id="hSummary"></div>
+    <p class="sub" id="hNote"></p>
+    <ul id="hList"></ul>
+    <p class="sub">These checks use general rules of thumb and compare each drive with your car's own history. They point at where to look. They are not a diagnosis, and they can't see oil, brakes, tires or belts.</p>
   </section>
 
   <section id="tab-service" hidden>
@@ -183,7 +192,7 @@ nav button[aria-selected="true"]{color:var(--accent);border-top-color:var(--acce
     <div class="card">
       <h2>Adapter log</h2>
       <p class="sub">The raw conversation with the adapter. If connecting fails, copy this and send it to Claude.</p>
-      <pre id="debug">Build 2. Nothing yet.</pre>
+      <pre id="debug">Build 3. Nothing yet.</pre>
       <div class="actions" style="margin-top:10px"><button class="btn ghost small" type="button" id="copyLog">Copy log</button><button class="btn ghost small" type="button" id="demoBtn">Back to demo data</button></div>
     </div>
   </section>
@@ -213,6 +222,7 @@ nav button[aria-selected="true"]{color:var(--accent);border-top-color:var(--acce
 
 <nav role="tablist">
   <button type="button" role="tab" data-tab="gauges" aria-selected="true">Gauges</button>
+  <button type="button" role="tab" data-tab="health" aria-selected="false">Health</button>
   <button type="button" role="tab" data-tab="service" aria-selected="false">Service</button>
   <button type="button" role="tab" data-tab="log" aria-selected="false">History</button>
   <button type="button" role="tab" data-tab="codes" aria-selected="false">Codes</button>
@@ -386,14 +396,139 @@ function renderSetup(){
   $("odoHelp").textContent="The car doesn't share its odometer, so mileage is worked out from its own miles-since-codes-cleared counter ("+fmt(state.lastCounter,1)+" mi at last reading). Re-enter the dash number here after codes are cleared or the battery is disconnected.";
   $("odoInput").value=Math.round(state.lastOdo); $("tankInput").value=state.tank; $("calInput").value=state.cal.toFixed(2);
 }
-function renderAll(){renderOdo();renderGauges();renderService();renderLog();renderCodes();renderSetup();}
+function renderAll(){renderOdo();renderGauges();renderHealth();renderService();renderLog();renderCodes();renderSetup();}
+
+/* ---------- health checks ---------- */
+function stat(){return{n:0,m:0,v:0};}
+function push(s,x){s.n++;var d=x-s.m;s.m+=d/s.n;s.v+=d*(x-s.m);}
+function sd(s){return s.n>1?Math.sqrt(s.v/s.n):0;}
+function r1(x){return Math.round(x*10)/10;}
+function r2(x){return Math.round(x*100)/100;}
+function med(a){var s=a.slice().sort(function(x,y){return x-y;}),n=s.length;return n?(n%2?s[(n-1)/2]:(s[n/2-1]+s[n/2])/2):null;}
+var sess=null, pending=null, miss={};
+function newSess(){sess={t:Date.now(),trim:{"06":stat(),"07":stat(),"08":stat(),"09":stat()},o2:{"14":stat(),"15":stat(),"18":stat(),"19":stat()},rest:null,charge:stat(),cold:null,warm:null,settle:stat(),runtime:null};}
+newSess();
+function isWarm(){return live.coolF!=null&&live.coolF>=160&&live.rpm>400;}
+function snapshot(){
+  var s=sess,T=s.trim,O=s.o2;
+  function avg(st,min){return st.n>=min?r1(st.m):null;}
+  function cat(up,dn){return(up.n>=40&&dn.n>=40&&sd(up)>=0.05)?r2(sd(dn)/sd(up)):null;}
+  return {t:s.t,st1:avg(T["06"],10),lt1:avg(T["07"],10),st2:avg(T["08"],10),lt2:avg(T["09"],10),rest:s.rest,charge:s.charge.n>=5?r2(s.charge.m):null,warm:s.warm,settle:avg(s.settle,5),cat1:cat(O["14"],O["15"]),cat2:cat(O["18"],O["19"]),o2flat:(O["14"].n>=40&&sd(O["14"])<0.05)};
+}
+function saveSnap(){
+  if(mode!=="live") return;
+  var sn=snapshot();
+  if(!["lt1","lt2","rest","charge","warm","settle","cat1","cat2"].some(function(k){return sn[k]!=null;})) return;
+  state.health=(state.health||[]).filter(function(x){return x.t!==sn.t;}); state.health.push(sn);
+  if(state.health.length>60) state.health=state.health.slice(-60);
+}
+var DEMO_CUR={t:-1,st1:1.2,lt1:3.1,st2:0.8,lt2:4.0,rest:12.4,charge:14.12,warm:6.5,settle:197,cat1:0.82,cat2:0.74,o2flat:false};
+var DEMO_HIST=[[2.4,3.2,12.5,14.15,6.1,196,0.70,0.66],[2.9,3.8,12.4,14.10,6.8,197,0.74,0.69],[2.6,3.5,12.5,14.14,5.9,196,0.77,0.70],[3.3,4.1,12.4,14.09,6.4,198,0.79,0.72],[3.0,3.9,12.4,14.11,6.6,197,0.80,0.73]].map(function(a,i){return{t:i,lt1:a[0],lt2:a[1],rest:a[2],charge:a[3],warm:a[4],settle:a[5],cat1:a[6],cat2:a[7]};});
+function signed(x){return(x>0?"+":"")+fmt(x,1)+"%";}
+function spark(vals){
+  if(vals.length<3) return "";
+  var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),span=(hi-lo)||1;
+  var pts=vals.map(function(v,i){return(4+i*(112/(vals.length-1))).toFixed(1)+","+(20-(v-lo)/span*16).toFixed(1);}), last=pts[pts.length-1].split(",");
+  return '<svg class="spark" viewBox="0 0 120 24" width="120" height="24" role="img" aria-label="Trend over the last '+vals.length+' drives"><polyline points="'+pts.join(" ")+'" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="'+last[0]+'" cy="'+last[1]+'" r="2.5" fill="currentColor"/></svg>';
+}
+function healthChecks(){
+  var demo=mode!=="live", cur=demo?DEMO_CUR:snapshot(), hs=demo?DEMO_HIST:(state.health||[]), out=[];
+  function prior(k){return hs.filter(function(x){return x.t!==cur.t&&x[k]!=null;}).map(function(x){return x[k];});}
+  function series(k){var p=prior(k);if(cur[k]!=null)p=p.concat([cur[k]]);return p;}
+  function worse(a,b){var o=["none","ok","soon","over"];return o.indexOf(a)>o.indexOf(b)?a:b;}
+
+  var pend=demo?[]:pending;
+  if(pend==null) out.push({title:"Pending codes",cls:"none",value:"Not read yet",text:"Open the Codes tab and tap Read codes from car."});
+  else if(!pend.length) out.push({title:"Pending codes",cls:"ok",value:"None",text:"The car hasn't spotted any new faults waiting to be confirmed."});
+  else out.push({title:"Pending codes",cls:"soon",value:pend.join(", "),text:"The car has detected "+(pend.length===1?"this fault":"these faults")+" on a recent drive. A fault that repeats turns the check-engine light on. "+pend.map(function(c){return CODE_TEXT[c]?c+": "+CODE_TEXT[c]+".":"";}).join(" ")});
+
+  if(cur.lt1==null&&cur.lt2==null) out.push({title:"Fuel mixture",cls:"none",value:"Collecting",text:"Needs about two minutes of driving with a warm engine."});
+  else{
+    var a=cur.lt1==null?null:cur.lt1+(cur.st1||0), b=cur.lt2==null?null:cur.lt2+(cur.st2||0);
+    var w=Math.max(Math.abs(a||0),Math.abs(b||0)), cls=w<8?"ok":w<15?"soon":"over", text;
+    if(cls==="ok") text="The engine is only making small corrections to its fuel mix.";
+    else{
+      var aBad=a!=null&&Math.abs(a)>=8, bBad=b!=null&&Math.abs(b)>=8, lean=(aBad?a:b)>0, dir=lean?"lean, so the engine is adding fuel":"rich, so the engine is pulling fuel";
+      text=(aBad&&bBad)?"Both banks are running "+dir+". A cause shared by both sides is likely: "+(lean?"a vacuum leak, a weak fuel pump or a clogged fuel filter.":"a leaking injector, high fuel pressure or a sensor reading wrong.")
+        :"Bank "+(aBad?1:2)+" is running "+dir+", while the other side is normal. Look at that side: an injector, an intake leak or its oxygen sensor.";
+    }
+    var p1=prior("lt1"),p2=prior("lt2"),usual="";
+    if(p1.length>=3&&cur.lt1!=null){
+      var m1=med(p1),m2=p2.length?med(p2):null;
+      usual="Usual long-term trim: bank 1 "+signed(m1)+(m2!=null?", bank 2 "+signed(m2):"")+".";
+      if(Math.abs(cur.lt1-m1)>5||(m2!=null&&cur.lt2!=null&&Math.abs(cur.lt2-m2)>5)){cls=worse(cls,"soon");text+=" This has moved more than 5 points from your car's usual.";}
+    }
+    out.push({title:"Fuel mixture",cls:cls,value:(a!=null?"Bank 1 "+signed(a):"")+(a!=null&&b!=null?" · ":"")+(b!=null?"Bank 2 "+signed(b):""),text:text,usual:usual,spark:spark(series("lt1"))});
+  }
+
+  if(cur.cat1==null&&cur.cat2==null) out.push({title:"Catalytic converters",cls:"none",value:cur.o2flat?"Can't measure":"Collecting",text:cur.o2flat?"The front oxygen sensors don't switch the way this check expects, so the app can't judge the converters this way.":"Needs a few minutes of steady driving above 20 mph with a warm engine."});
+  else{
+    var c=Math.max(cur.cat1||0,cur.cat2||0), ccls=c<0.35?"ok":c<0.6?"soon":"over";
+    var which=[cur.cat1,cur.cat2].map(function(v,i){return v!=null&&v>=0.35?i+1:0;}).filter(Boolean);
+    var ct=ccls==="ok"?"The rear oxygen sensors are steady, which means the converters are storing oxygen as they should."
+      :"On bank "+which.join(" and ")+" the rear sensor swings "+(ccls==="over"?"nearly as much as":"a fair amount compared with")+" the front one, so the converter isn't storing much oxygen. That fits codes P0420 and P0430. An exhaust leak ahead of the rear sensor can look the same.";
+    out.push({title:"Catalytic converters",cls:ccls,value:(cur.cat1!=null?"Bank 1 "+fmt(cur.cat1,2):"")+(cur.cat1!=null&&cur.cat2!=null?" · ":"")+(cur.cat2!=null?"Bank 2 "+fmt(cur.cat2,2):""),text:ct+" The number is rear sensor activity divided by front. Lower is better, and it is a rough estimate.",spark:spark(series("cat1"))});
+  }
+
+  if(cur.rest==null) out.push({title:"Battery at rest",cls:"none",value:"Not measured",text:"Connect with the ignition on before you start the engine to measure this."});
+  else out.push({title:"Battery at rest",cls:cur.rest>=12.4?"ok":cur.rest>=12?"soon":"over",value:fmt(cur.rest,2)+" V",text:cur.rest>=12.4?"Healthy for a battery with the ignition on.":cur.rest>=12?"Partly discharged. That's common after short trips or sitting, but have it tested if it stays here.":"Low. The battery may struggle to start the car. Have it tested.",spark:spark(series("rest"))});
+
+  if(cur.charge==null) out.push({title:"Charging system",cls:"none",value:"Collecting",text:"Needs the engine running for about a minute."});
+  else{
+    var v=cur.charge, vc=(v>=13.5&&v<=14.8)?"ok":(v>=13&&v<=15.2)?"soon":"over";
+    var vt=(v>=13.5&&v<=14.8)?"The alternator is charging normally.":v<13.5?"Lower than normal while running. The alternator or its belt may be weak.":"Higher than normal while running. The voltage regulator may be failing.";
+    var pc=prior("charge"),vu="";
+    if(pc.length>=3){var mc=med(pc);vu="Usual: "+fmt(mc,2)+" V.";if(Math.abs(v-mc)>0.4){vc=worse(vc,"soon");vt+=" This is "+fmt(Math.abs(v-mc),1)+" V away from your car's usual.";}}
+    out.push({title:"Charging system",cls:vc,value:fmt(v,2)+" V",text:vt,usual:vu,spark:spark(series("charge"))});
+  }
+
+  if(cur.settle==null&&cur.warm==null) out.push({title:"Cooling system",cls:"none",value:"Collecting",text:"Needs a cold start, or a drive longer than 15 minutes."});
+  else{
+    var kc="ok",kt=[],kv=[],ku="";
+    if(cur.settle!=null){
+      kv.push("Runs at "+fmt(cur.settle)+" °F");
+      if(cur.settle>230){kc="over";kt.push("Running hotter than it should. Check the coolant level, fans and radiator.");}
+      else if(cur.settle>220){kc="soon";kt.push("On the warm side of normal.");}
+      else if(cur.settle<170){kc="soon";kt.push("Not reaching full temperature, which points to a thermostat stuck open.");}
+      else kt.push("Operating temperature is normal.");
+    }
+    if(cur.warm!=null){
+      kv.push((kv.length?"warmed up in ":"Warmed up in ")+fmt(cur.warm,1)+" min");
+      var pw=prior("warm");
+      if(pw.length>=3){var mw=med(pw);ku="Usual warm-up: "+fmt(mw,1)+" min.";if(cur.warm>mw*1.4&&cur.warm-mw>=3){kc=worse(kc,"soon");kt.push("Warm-up took much longer than usual. Cold weather does this too, but a sticking thermostat is the common fault.");}}
+    }
+    out.push({title:"Cooling system",cls:kc,value:kv.join(" · "),text:kt.join(" "),usual:ku,spark:spark(series("settle"))});
+  }
+
+  var mon=demo?[0x07,0xE5,0x00]:live.mon;
+  if(!mon) out.push({title:"Emissions self-tests",cls:"none",value:"Not read yet",text:"Waiting for the car to report."});
+  else{
+    var names=["Catalyst","Heated catalyst","Evaporative system","Secondary air","A/C refrigerant","Oxygen sensor","Oxygen sensor heater","EGR"],inc=[];
+    if(mon[0]&0x10)inc.push("Misfire"); if(mon[0]&0x20)inc.push("Fuel system"); if(mon[0]&0x40)inc.push("Components");
+    for(var q=0;q<8;q++) if((mon[1]>>q&1)&&(mon[2]>>q&1)) inc.push(names[q]);
+    var milNote=live.milOn?" An emissions inspection will not pass while the check-engine light is on.":"";
+    out.push(inc.length?{title:"Emissions self-tests",cls:"soon",value:inc.length+" not finished",text:"Still to run: "+inc.join(", ")+". This is normal after codes are cleared or the battery is disconnected. They finish with ordinary driving."+milNote}
+      :{title:"Emissions self-tests",cls:live.milOn?"soon":"ok",value:"All complete",text:"The car has finished every self-test it supports."+milNote});
+  }
+  return out;
+}
+var H_LABEL={over:"Problem",soon:"Watch",ok:"Good",none:"Waiting"};
+function renderHealth(){
+  var cs=healthChecks(), n={over:0,soon:0,ok:0,none:0}; cs.forEach(function(c){n[c.cls]++;});
+  $("hSummary").innerHTML=[["over","problem"],["soon","to watch"],["ok","good"],["none","waiting for data"]].filter(function(p){return n[p[0]];}).map(function(p){return'<span class="pill s-'+p[0]+'">'+n[p[0]]+" "+p[1]+"</span>";}).join("");
+  var saved=(state.health||[]).length;
+  $("hNote").textContent=mode==="live"?"Readings from this drive. "+saved+" drive"+(saved===1?"":"s")+" saved so far. Trend lines and comparisons with your car's usual appear after three.":"Sample readings, not from your car. Connect the adapter to see the real ones.";
+  $("hList").innerHTML=cs.map(function(c){
+    return '<li class="item '+c.cls+'"><div class="row"><strong>'+c.title+'</strong><span class="pill s-'+c.cls+'">'+H_LABEL[c.cls]+'</span></div><div class="hval">'+esc(c.value)+'</div><div class="sub">'+esc(c.text)+(c.usual?" "+esc(c.usual):"")+"</div>"+(c.spark||"")+"</li>";
+  }).join("");
+}
 
 /* ---------- tabs ---------- */
 document.querySelector("nav").addEventListener("click",function(e){
   var b=e.target.closest("button[data-tab]"); if(!b) return;
   document.querySelectorAll("nav button").forEach(function(x){x.setAttribute("aria-selected",x===b?"true":"false");});
   document.querySelectorAll("main section").forEach(function(s){s.hidden=s.id!=="tab-"+b.dataset.tab;});
-  renderService();renderLog();renderCodes();renderSetup();
+  renderHealth();renderService();renderLog();renderCodes();renderSetup();
 });
 
 /* ---------- service sheet ---------- */
@@ -438,7 +573,7 @@ $("copyLog").addEventListener("click",function(){
 $("demoBtn").addEventListener("click",function(){disconnect();startDemo();});
 
 /* ---------- Bluetooth adapter (ELM327 over Bluetooth LE) ---------- */
-var BUILD=2;
+var BUILD=3;
 var SERVICES=["000018f0-0000-1000-8000-00805f9b34fb","0000fff0-0000-1000-8000-00805f9b34fb","0000ffe0-0000-1000-8000-00805f9b34fb","e7810a71-73ae-499d-8c15-faa9aef0c3f2"];
 var NAMES=["vLinker","VLinker","Vlink","IOS-Vlink","V-LINK","Android-Vlink","OBD","ELM"];
 function errText(e){if(e==null)return"no error details";if(typeof e==="string")return e;return (e.name?e.name+": ":"")+(e.message||JSON.stringify(e));}
@@ -477,13 +612,14 @@ function bytes(r,head){
   var h=l.slice(head.length),out=[]; for(var i=0;i+1<h.length;i+=2) out.push(parseInt(h.substr(i,2),16)); return out;
 }
 function pid(p){return cmd("01"+p,3000).then(function(r){return bytes(r,"41"+p);});}
-function decodeDtcs(r){
+function decodeDtcs(r,head){
+  head=head||"43";
   var ls=lines(r), msgs=[];
   if(ls.some(function(l){return /^[0-9A-F]:/.test(l);})) msgs.push(ls.filter(function(l){return /^[0-9A-F]:/.test(l);}).map(function(l){return l.slice(2);}).join(""));
-  else msgs=ls.filter(function(l){return l.indexOf("43")===0;});
+  else msgs=ls.filter(function(l){return l.indexOf(head)===0;});
   var found=[];
   msgs.forEach(function(m){
-    var h=m.slice(m.indexOf("43")+4); // skip the "43" marker and the count byte
+    var h=m.slice(m.indexOf(head)+4); // skip the mode marker and the count byte
     for(var i=0;i+3<h.length;i+=4){
       var a=parseInt(h.substr(i,2),16), b=h.substr(i+2,2); if(isNaN(a)||(a===0&&b==="00")) continue;
       var code="PCBU"[a>>6]+((a>>4)&3)+(a&15).toString(16).toUpperCase()+b;
@@ -498,21 +634,41 @@ function applyCounter(km){
   else if(c+1<state.lastCounter){state.odoOffset=state.lastOdo;state.odoCheck=true;notice("The car's codes were cleared, so mileage is now an estimate. Enter the dash odometer in Setup.");}
   state.lastCounter=c; state.lastOdo=state.odoOffset+c; save(); renderOdo();
 }
-var SLOW=["05","0F","2F","42","31","01","21"];
+var SLOW=["1F","05","0F","2F","42","31","01","21","06","07","08","09","46"];
+var OPTIONAL={"1F":1,"06":1,"07":1,"08":1,"09":1,"46":1};
+var O2=["14","15","18","19"];
+function o2Alive(){return O2.filter(function(p){return(miss[p]||0)<3;});}
+function readO2(p){
+  return pid(p).then(function(b){
+    if(!b){miss[p]=(miss[p]||0)+1;return;} miss[p]=0;
+    if(isWarm()&&live.speed>20) push(sess.o2[p],b[0]/200);
+  });
+}
 function readSlow(p){
   return pid(p).then(function(b){
-    if(!b) return;
-    if(p==="05") live.coolF=(b[0]-40)*1.8+32;
+    if(!b){miss[p]=(miss[p]||0)+1;return;} miss[p]=0;
+    if(p==="05"){
+      live.coolF=(b[0]-40)*1.8+32;
+      if(sess.runtime!=null){
+        if(sess.cold==null) sess.cold=(live.coolF<120&&sess.runtime<180);
+        if(sess.cold&&sess.warm==null&&live.coolF>=170) sess.warm=r1(sess.runtime/60);
+        if(sess.runtime>900&&live.rpm>400) push(sess.settle,live.coolF);
+      }
+    }
     else if(p==="0F") live.iatF=(b[0]-40)*1.8+32;
     else if(p==="2F") live.fuelPct=b[0]*100/255;
-    else if(p==="42") live.volts=(b[0]*256+b[1])/1000;
+    else if(p==="42"){live.volts=(b[0]*256+b[1])/1000; if(live.rpm<50){if(sess.rest==null) sess.rest=r2(live.volts);} else if(live.rpm>400) push(sess.charge,live.volts);}
     else if(p==="31") applyCounter(b[0]*256+b[1]);
-    else if(p==="01"){live.milOn=!!(b[0]&128);live.dtcCount=b[0]&127;}
+    else if(p==="01"){live.milOn=!!(b[0]&128);live.dtcCount=b[0]&127;live.mon=[b[1],b[2],b[3]];}
     else if(p==="21") live.milMiles=(b[0]*256+b[1])*KM;
+    else if(p==="1F") sess.runtime=b[0]*256+b[1];
+    else if(p==="46") live.ambF=(b[0]-40)*1.8+32;
+    else if(p==="06"||p==="07"||p==="08"||p==="09"){if(isWarm()) push(sess.trim[p],(b[0]-128)*100/128);}
   });
 }
 async function poll(){
-  bt.polling=true; var i=0,last=Date.now(),saveAt=Date.now();
+  bt.polling=true; var i=0,j=0,hAt=0,last=Date.now(),saveAt=Date.now();
+  try{var b0=await pid("0C"); if(b0) live.rpm=(b0[0]*256+b0[1])/4;}catch(e){}
   for(var k=0;k<SLOW.length;k++){try{await readSlow(SLOW[k]);}catch(e){}}
   renderAll();
   while(bt.polling){
@@ -521,15 +677,18 @@ async function poll(){
       b=await pid("0D"); if(b) live.speed=b[0]*KM;
       b=await pid("0B"); if(b) live.mapKpa=b[0];
       b=await pid("04"); if(b) live.load=b[0]*100/255;
-      await readSlow(SLOW[i++%SLOW.length]);
+      var alive=o2Alive(); if(alive.length) await readO2(alive[j++%alive.length]);
+      var sp=null; for(var t=0;t<SLOW.length&&!sp;t++){var cand=SLOW[i++%SLOW.length]; if(!OPTIONAL[cand]||(miss[cand]||0)<3) sp=cand;}
+      if(sp) await readSlow(sp);
     }catch(e){ if(!bt.polling) break; dbg("Read error: "+errText(e)); await new Promise(function(r){setTimeout(r,1000);}); }
     var now=Date.now(); integrate((now-last)/1000); last=now;
-    if(now-saveAt>15000){save();saveAt=now;}
+    if(now-saveAt>15000){saveSnap();save();saveAt=now;}
+    if(now-hAt>3000&&!$("tab-health").hidden){renderHealth();hAt=now;}
     renderGauges();
   }
 }
 function disconnect(){
-  bt.polling=false; save();
+  bt.polling=false; saveSnap(); save();
   try{if(bt.device&&bt.device.gatt.connected) bt.device.gatt.disconnect();}catch(e){}
   $("connectBtn").textContent="Connect adapter";
 }
@@ -558,7 +717,8 @@ async function connect(){
     var test=await cmd("0100",8000);
     if(!bytes(test,"4100")){await cmd("ATSP0"); test=await cmd("0100",12000);}
     if(!bytes(test,"4100")) throw new Error("The adapter connected but the car didn't answer. Turn the ignition on and try again.");
-    stopDemo(); mode="live"; codes=[]; live.speed=0; live.rpm=0;
+    stopDemo(); mode="live"; codes=[]; live.speed=0; live.rpm=0; live.mon=null; newSess(); miss={};
+    try{pending=decodeDtcs(await cmd("07",6000),"47");}catch(e){pending=null;}
     setStatus("Connected","live"); $("connectBtn").textContent="Disconnect"; renderAll(); poll();
   }catch(err){
     dbg("Connect failed: "+errText(err)); setStatus(mode==="demo"?"Demo data":"Not connected",mode==="demo"?"demo":"");
@@ -569,8 +729,8 @@ $("connectBtn").addEventListener("click",function(){ if(mode==="live"&&bt.pollin
 $("readCodes").addEventListener("click",async function(){
   var b=this; b.textContent="Reading…"; var was=bt.polling; bt.polling=false;
   await new Promise(function(r){setTimeout(r,1500);});
-  try{codes=decodeDtcs(await cmd("03",6000));}catch(e){notice(e.message);}
-  b.textContent="Read codes from car"; renderCodes(); if(was) poll();
+  try{codes=decodeDtcs(await cmd("03",6000)); pending=decodeDtcs(await cmd("07",6000),"47");}catch(e){notice(errText(e));}
+  b.textContent="Read codes from car"; renderCodes(); renderHealth(); if(was) poll();
 });
 
 startDemo();
