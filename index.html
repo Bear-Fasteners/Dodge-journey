@@ -183,7 +183,7 @@ nav button[aria-selected="true"]{color:var(--accent);border-top-color:var(--acce
     <div class="card">
       <h2>Adapter log</h2>
       <p class="sub">The raw conversation with the adapter. If connecting fails, copy this and send it to Claude.</p>
-      <pre id="debug">Nothing yet.</pre>
+      <pre id="debug">Build 2. Nothing yet.</pre>
       <div class="actions" style="margin-top:10px"><button class="btn ghost small" type="button" id="copyLog">Copy log</button><button class="btn ghost small" type="button" id="demoBtn">Back to demo data</button></div>
     </div>
   </section>
@@ -438,7 +438,23 @@ $("copyLog").addEventListener("click",function(){
 $("demoBtn").addEventListener("click",function(){disconnect();startDemo();});
 
 /* ---------- Bluetooth adapter (ELM327 over Bluetooth LE) ---------- */
-var SERVICES=[0x18f0,0xfff0,0xffe0,"e7810a71-73ae-499d-8c15-faa9aef0c3f2"];
+var BUILD=2;
+var SERVICES=["000018f0-0000-1000-8000-00805f9b34fb","0000fff0-0000-1000-8000-00805f9b34fb","0000ffe0-0000-1000-8000-00805f9b34fb","e7810a71-73ae-499d-8c15-faa9aef0c3f2"];
+var NAMES=["vLinker","VLinker","Vlink","IOS-Vlink","V-LINK","Android-Vlink","OBD","ELM"];
+function errText(e){if(e==null)return"no error details";if(typeof e==="string")return e;return (e.name?e.name+": ":"")+(e.message||JSON.stringify(e));}
+function isCancel(e){return /cancel|NotFoundError|abort/i.test(errText(e));}
+async function pickDevice(){
+  var tries=[
+    ["any device",{acceptAllDevices:true,optionalServices:SERVICES}],
+    ["by name",{filters:NAMES.map(function(n){return{namePrefix:n};}),optionalServices:SERVICES}],
+    ["by service",{filters:SERVICES.map(function(s){return{services:[s]};})}]
+  ], lastErr=null;
+  for(var i=0;i<tries.length;i++){
+    try{dbg("Asking for a device ("+tries[i][0]+")");return await navigator.bluetooth.requestDevice(tries[i][1]);}
+    catch(e){lastErr=e;dbg("  failed: "+errText(e));if(isCancel(e))break;}
+  }
+  throw lastErr;
+}
 var bt={device:null,tx:null,rx:null,buf:"",waiter:null,polling:false};
 var logLines=[];
 function dbg(s){logLines.push(s);if(logLines.length>200)logLines.shift();$("debug").textContent=logLines.join("\n");}
@@ -506,7 +522,7 @@ async function poll(){
       b=await pid("0B"); if(b) live.mapKpa=b[0];
       b=await pid("04"); if(b) live.load=b[0]*100/255;
       await readSlow(SLOW[i++%SLOW.length]);
-    }catch(e){ if(!bt.polling) break; dbg("Read error: "+e.message); await new Promise(function(r){setTimeout(r,1000);}); }
+    }catch(e){ if(!bt.polling) break; dbg("Read error: "+errText(e)); await new Promise(function(r){setTimeout(r,1000);}); }
     var now=Date.now(); integrate((now-last)/1000); last=now;
     if(now-saveAt>15000){save();saveAt=now;}
     renderGauges();
@@ -521,7 +537,8 @@ async function connect(){
   if(!navigator.bluetooth){notice("This browser can't use Bluetooth. Open this page in the Bluefy app on your iPhone to connect to the adapter.");return;}
   notice(""); setStatus("Connecting…","");
   try{
-    bt.device=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:SERVICES});
+    dbg("Build "+BUILD+" · "+navigator.userAgent);
+    bt.device=await pickDevice();
     dbg("Chose device: "+(bt.device.name||"(no name)"));
     bt.device.addEventListener("gattserverdisconnected",function(){if(mode==="live"){bt.polling=false;setStatus("Disconnected","");notice("Lost the connection to the adapter. Tap Connect adapter to try again.");$("connectBtn").textContent="Connect adapter";}});
     var server=await bt.device.gatt.connect(); bt.tx=bt.rx=null;
@@ -533,6 +550,7 @@ async function connect(){
         bt.tx=chars.filter(function(c){return c.properties.writeWithoutResponse||c.properties.write;})[0]||null;
       }catch(e){}
     }
+    if(!bt.tx||!bt.rx){try{var all=await server.getPrimaryServices();dbg("Services on this device: "+all.map(function(x){return x.uuid;}).join(", "));}catch(e){dbg("Could not list services: "+errText(e));}}
     if(!bt.tx||!bt.rx) throw new Error("That device doesn't look like the OBD adapter. Pick the one whose name contains Vlink or OBD.");
     await bt.rx.startNotifications(); bt.rx.addEventListener("characteristicvaluechanged",onData);
     try{await cmd("ATZ",6000);}catch(e){}
@@ -543,8 +561,8 @@ async function connect(){
     stopDemo(); mode="live"; codes=[]; live.speed=0; live.rpm=0;
     setStatus("Connected","live"); $("connectBtn").textContent="Disconnect"; renderAll(); poll();
   }catch(err){
-    dbg("Connect failed: "+err.message); setStatus(mode==="demo"?"Demo data":"Not connected",mode==="demo"?"demo":"");
-    if(err.name!=="NotFoundError") notice(err.message);
+    dbg("Connect failed: "+errText(err)); setStatus(mode==="demo"?"Demo data":"Not connected",mode==="demo"?"demo":"");
+    notice(isCancel(err)?"No adapter was chosen. Tap Connect adapter and pick the Vlink device from the list.":"Couldn't connect: "+errText(err)+". Copy the adapter log in Setup and send it to Claude.");
   }
 }
 $("connectBtn").addEventListener("click",function(){ if(mode==="live"&&bt.polling){disconnect();setStatus("Not connected","");} else connect(); });
